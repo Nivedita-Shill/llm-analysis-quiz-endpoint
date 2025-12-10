@@ -13,5 +13,8 @@
     "node-fetch": "2.6.7",
     "pdf-parse": "^1.1.1",
     "playwright": "^1.41.2"
+  },
+  "playwright": {
+    "skipBrowserDownload": false
   }
 }
