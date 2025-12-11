@@ -7,70 +7,98 @@ const app = express();
 app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 10000;
+const SECRET = "my-top-secret-123";
 
-// ----------- Solve a single quiz page -----------
+// ----------------------------------------------------------------------
+// Helper: Extract quiz instruction JSON from <pre>...</pre>
+// ----------------------------------------------------------------------
+async function extractInstructionJson(page) {
+  const preBlocks = await page.$$eval("pre", (nodes) =>
+    nodes.map((n) => n.innerText.trim())
+  );
+
+  for (const block of preBlocks) {
+    try {
+      const parsed = JSON.parse(block);
+      return parsed; // MUST contain { answer: ..., submitUrl: ... }
+    } catch (e) {}
+  }
+
+  return null;
+}
+
+// ----------------------------------------------------------------------
+// Helper: Auto-compute an answer if the JSON describes known tasks
+// ----------------------------------------------------------------------
+function autoSolve(json) {
+  if (!json) return null;
+
+  // If quiz gives "value" or direct numeric results
+  if (typeof json.value === "number") return json.value;
+
+  // If quiz gives a table and asks to sum "value" column
+  if (Array.isArray(json.table)) {
+    return json.table.reduce((sum, row) => sum + (row.value || 0), 0);
+  }
+
+  // Fallback: if quiz gives "sum" or "answer"
+  if (json.sum) return json.sum;
+  if (json.answer) return json.answer;
+
+  // Default fallback
+  return 0;
+}
+
+// ----------------------------------------------------------------------
+// Core solver: loads quiz page, waits for JS rendering, extracts JSON,
+// computes answer, submits, returns results.
+// ----------------------------------------------------------------------
 async function solveQuizPage(quizUrl, email, secret, browser) {
-  console.log("Solving:", quizUrl);
+  console.log("🟦 Solving:", quizUrl);
 
   const context = await browser.newContext();
   const page = await context.newPage();
 
   await page.goto(quizUrl, { waitUntil: "load", timeout: 30000 });
 
-  // ⭐ NEW: Wait for IITM JS to populate #result using atob()
+  // ⭐ CRITICAL FIX — WAIT FOR JS TO RENDER BASE64 CONTENT
   try {
     await page.waitForFunction(() => {
       const el = document.querySelector("#result");
       return el && el.innerText.trim().length > 0;
     }, { timeout: 7000 });
   } catch (err) {
-    console.log("Dynamic content not fully loaded:", err);
+    console.log("⚠ Dynamic JS content not fully loaded:", err);
   }
 
-  // Extract the fully rendered HTML & visible text
+  // Retrieve full HTML & text
   const html = await page.content();
-  const bodyText = await page.innerText("body");
-  console.log("Extracted page length:", html.length);
+  const text = await page.innerText("body");
 
-  // Look for a SUBMIT JSON payload inside <pre>...</pre>
-  let extractedJson = null;
-  const preBlocks = await page.$$eval("pre", (nodes) =>
-    nodes.map((n) => n.innerText)
-  );
+  // Extract instruction JSON from <pre> blocks
+  const instructionJson = await extractInstructionJson(page);
 
-  for (const block of preBlocks) {
-    try {
-      const parsed = JSON.parse(block);
-      if (parsed.answer !== undefined) {
-        extractedJson = parsed;
-        break;
-      }
-    } catch (e) {}
+  if (!instructionJson) {
+    console.log("❌ No quiz JSON found on page.");
+    await page.close();
+    await context.close();
+    return {
+      submitUrl: null,
+      answer: null,
+      reason: "no-json-found",
+      submitResponse: null,
+      text,
+    };
   }
 
-  if (!extractedJson) {
-    console.log("❗ Could not find an instruction JSON block.");
-    return { submitUrl: null, answer: null, reason: "no-json-found" };
-  }
+  const submitUrl = instructionJson.submitUrl || instructionJson.url;
+  const computedAnswer = autoSolve(instructionJson);
 
-  const submitUrl = extractedJson.submitUrl || extractedJson.url;
-  const reason = extractedJson.reason || "parsed";
-
-  let computedAnswer = null;
-
-  // ⭐ Auto-solve supported question types
-  if (extractedJson.table) {
-    computedAnswer = extractedJson.table.reduce((sum, row) => sum + (row.value || 0), 0);
-  } else if (typeof extractedJson.value === "number") {
-    computedAnswer = extractedJson.value;
-  } else if (extractedJson.sum) {
-    computedAnswer = extractedJson.sum;
-  } else {
-    computedAnswer = 0;
-  }
-
-  // SUBMIT the answer if we have a URL
+  // ----------------------------------------------------------------------
+  // Submit the answer to submitUrl
+  // ----------------------------------------------------------------------
   let submitResponse = null;
+
   if (submitUrl) {
     const payload = {
       email,
@@ -79,7 +107,7 @@ async function solveQuizPage(quizUrl, email, secret, browser) {
       answer: computedAnswer,
     };
 
-    console.log("Submitting →", submitUrl, payload);
+    console.log("➡ Submitting answer:", payload);
 
     try {
       const resp = await fetch(submitUrl, {
@@ -87,10 +115,11 @@ async function solveQuizPage(quizUrl, email, secret, browser) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+
       submitResponse = await resp.json();
-      console.log("Submit Response:", submitResponse);
+      console.log("⬅ Submit Response:", submitResponse);
     } catch (e) {
-      console.log("Submission failed:", e);
+      console.log("❌ Submission error:", e);
     }
   }
 
@@ -99,39 +128,43 @@ async function solveQuizPage(quizUrl, email, secret, browser) {
 
   return {
     html,
-    bodyText,
+    text,
     submitUrl,
     answer: computedAnswer,
-    reason,
+    reason: "solved",
     submitResponse,
   };
 }
 
-// ----------- Handle API /api/quiz -----------
+// ----------------------------------------------------------------------
+// API endpoint: /api/quiz
+// ----------------------------------------------------------------------
 app.post("/api/quiz", async (req, res) => {
   try {
     const { email, secret, url } = req.body;
+
     if (!email || !secret || !url) {
       return res.status(400).json({ error: "missing-fields" });
     }
 
-    // validate secret
-    if (secret !== "my-top-secret-123") {
+    if (secret !== SECRET) {
       return res.status(403).json({ error: "invalid-secret" });
     }
 
     const browser = await chromium.launch({ headless: true });
-    let nextUrl = url;
-    let finalResult = null;
 
-    // ⭐ Automatically follow quiz chain until a page gives no "nextUrl"
+    let nextUrl = url;
+    let final = null;
+
+    // Follow up to 10 chained quiz steps
     for (let i = 0; i < 10; i++) {
       const result = await solveQuizPage(nextUrl, email, secret, browser);
-      finalResult = result;
+      final = result;
 
       if (!result.submitResponse || !result.submitResponse.url) break;
+
       nextUrl = result.submitResponse.url;
-      console.log("➡️ Next:", nextUrl);
+      console.log("🔗 NEXT:", nextUrl);
     }
 
     await browser.close();
@@ -139,18 +172,22 @@ app.post("/api/quiz", async (req, res) => {
     return res.json({
       ok: true,
       quizUrl: url,
-      submitUrl: finalResult?.submitUrl ?? null,
-      answer: finalResult?.answer ?? null,
-      reason: finalResult?.reason ?? null,
-      decodedPreview: finalResult?.bodyText ?? null,
-      submitResponse: finalResult?.submitResponse ?? null,
+      submitUrl: final?.submitUrl ?? null,
+      answer: final?.answer ?? null,
+      reason: final?.reason ?? null,
+      decodedPreview: final?.text ?? null,
+      submitResponse: final?.submitResponse ?? null,
     });
-  } catch (e) {
-    console.error("Server error:", e);
-    return res.status(500).json({ error: "server-error", message: e.toString() });
+
+  } catch (err) {
+    console.error("SERVER ERROR:", err);
+    return res.status(500).json({ error: "server-error", message: err.toString() });
   }
 });
 
+// ----------------------------------------------------------------------
+// Start Server
+// ----------------------------------------------------------------------
 app.listen(PORT, () => {
-  console.log("Listening on port", PORT);
+  console.log("✨ Server running on port", PORT);
 });
