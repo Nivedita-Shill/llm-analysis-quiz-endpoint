@@ -1,3 +1,7 @@
+// ----------------------
+//  LLM Analysis Quiz Bot
+// ----------------------
+
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
@@ -6,223 +10,142 @@ import { chromium } from "playwright";
 const app = express();
 app.use(bodyParser.json());
 
-const SECRET = "my-top-secret-123"; // your secret
+// Auto-select Render port
+const PORT = process.env.PORT || 10000;
 
-//---------------------------------------------------------------------
-// Utility: extract JSON from <pre>...</pre>
-//---------------------------------------------------------------------
-async function extractJsonFromPage(page) {
+// ============================================================
+// Helper: extract embedded JSON from page
+// ============================================================
+async function extractQuizJSON(page) {
   try {
-    // Wait for dynamic JS to load (but do NOT throw fatal error)
-    await page.waitForFunction(
-      () => document.querySelector("pre")?.innerText.length > 2,
-      { timeout: 5000 }
-    );
-  } catch (e) {
-    console.log("⚠ Page did not render JSON immediately — continuing…");
-  }
-
-  const pre = await page.$("pre");
-  if (!pre) return null;
-
-  const text = await pre.innerText();
-  try {
-    const json = JSON.parse(text);
-    return { json, raw: text };
+    const json = await page.evaluate(() => {
+      const pre = document.querySelector("pre[data-quiz-json]");
+      if (!pre) return null;
+      return JSON.parse(pre.textContent);
+    });
+    return json;
   } catch {
     return null;
   }
 }
 
-//---------------------------------------------------------------------
-// Solve one quiz page
-//---------------------------------------------------------------------
-async function solveQuizPage(url, email, secret, browser) {
-  console.log(`🔍 Solving ${url}`);
+// ============================================================
+// Route: /api/quiz
+// ============================================================
+app.post("/api/quiz", async (req, res) => {
+  const { email, secret, url } = req.body;
 
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-
-  const extracted = await extractJsonFromPage(page);
-
-  if (!extracted) {
-    console.log("❌ No quiz JSON found on page.");
-    return {
-      answer: null,
-      reason: "no-json-found",
-      submitUrl: null,
-      submitResponse: null,
-      text: null
-    };
+  if (!email || !secret || !url) {
+    return res.json({
+      ok: false,
+      reason: "missing-fields",
+    });
   }
 
-  const quiz = extracted.json;
-  const textPreview = extracted.raw.slice(0, 200);
+  console.log("\n\n==============================");
+  console.log(" Solving:", url);
+  console.log("==============================\n");
 
-  console.log("📄 Extracted quiz JSON:", quiz);
+  let nextUrl = url;
 
-  // ------------------------------------------------------
-  // Solve based on quiz instructions
-  // ------------------------------------------------------
-  let answer = null;
-  let reason = "";
+  // ------------------------------------------------------------
+  // SPECIAL HANDLING FOR PROJECT2 — MUST SUBMIT EMPTY ANSWER FIRST
+  // ------------------------------------------------------------
+  if (url.endsWith("/project2")) {
+    console.log("🔵 Project2 initial submission required…");
 
-  if (quiz.task === "uv") {
-    answer = `uv http get https://tds-llm-analysis.s-anand.net/project2/uv.json?email=${email} -H "Accept: application/json"`;
-  }
-
-  else if (quiz.task === "git") {
-    answer = `git add env.sample\ngit commit -m "chore: keep env sample"`;
-  }
-
-  else if (quiz.task === "md") {
-    answer = "/project2/data-preparation.md";
-  }
-
-  else if (quiz.task === "audio-passphrase") {
-    answer = "first part 219";  // your transcription
-  }
-
-  else if (quiz.task === "heatmap") {
-    answer = "#b35a1f"; // most frequent color pre-calculated
-  }
-
-  else if (quiz.task === "csv") {
-    answer = JSON.stringify([
-      { id: 1, name: "alice", joined: "2023-01-01", value: 10 },
-      { id: 2, name: "bob", joined: "2023-02-01", value: 20 }
-    ]);
-  }
-
-  else if (quiz.task === "gh-tree") {
-    // your repo computation
-    answer = quiz.expected; // placeholder: Quiz expects the integer result
-  }
-
-  else {
-    reason = "unknown-task";
-  }
-
-  if (!answer) {
-    return {
-      answer,
-      reason: "no-answer-generated",
-      submitUrl: null,
-      submitResponse: null,
-      text: extracted.raw
-    };
-  }
-
-  console.log("📝 Answer:", answer);
-
-  // ------------------------------------------------------
-  // Submit answer to the official endpoint
-  // ------------------------------------------------------
-  const submitResponse = await fetch("https://tds-llm-analysis.s-anand.net/submit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+    const initBody = {
       email,
       secret,
       url,
-      answer
-    })
-  });
+      answer: ""  // MUST be empty string for step 1
+    };
 
-  const submitJson = await submitResponse.json();
-  console.log("📨 Submit Response:", submitJson);
+    console.log("➡ Submitting initial POST:", initBody);
 
-  return {
-    answer,
-    reason,
-    text: extracted.raw,
-    submitUrl: submitJson.url ?? null,
-    submitResponse: submitJson
-  };
-}
+    const initResp = await fetch("https://tds-llm-analysis.s-anand.net/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(initBody)
+    });
 
-//---------------------------------------------------------------------
-// MAIN QUIZ SOLVER ENDPOINT
-//---------------------------------------------------------------------
-app.post("/api/quiz", async (req, res) => {
-  try {
-    const { email, secret, url } = req.body;
+    const initJson = await initResp.json();
+    console.log("➡ Initial submit response:", initJson);
 
-    if (!email || !secret || !url)
-      return res.status(400).json({ error: "missing-fields" });
-
-    if (secret !== SECRET)
-      return res.status(403).json({ error: "invalid-secret" });
-
-    const browser = await chromium.launch({ headless: true });
-
-    let nextUrl = url;
-    let final = null;
-
-    //------------------------------------------------------------------
-    // PROJECT 2 SPECIAL CASE — MUST SEND INITIAL POST FIRST
-    //------------------------------------------------------------------
-    if (url.endsWith("/project2")) {
-      console.log("🔵 Project2 initial submission required…");
-
-      const initResp = await fetch("https://tds-llm-analysis.s-anand.net/submit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          secret,
-          url,
-          answer: ""  // must be empty for step 0
-        })
+    if (!initJson.url) {
+      return res.json({
+        ok: false,
+        reason: "initial-submit-failed",
+        submitResponse: initJson
       });
-
-      const initJson = await initResp.json();
-      console.log("➡ Initial response:", initJson);
-
-      if (!initJson.url) {
-        return res.json({
-          ok: false,
-          reason: "initial-submit-failed",
-          submitResponse: initJson
-        });
-      }
-
-      nextUrl = initJson.url; // NOW contains real quiz JSON
     }
 
-    //------------------------------------------------------------------
-    // Begin automated solving chain
-    //------------------------------------------------------------------
-    for (let i = 0; i < 15; i++) {
-      const result = await solveQuizPage(nextUrl, email, secret, browser);
-      final = result;
+    nextUrl = initJson.url;
+  }
 
-      if (!result.submitResponse || !result.submitResponse.url) break;
+  // ------------------------------------------------------------
+  // Open the quiz page using Playwright
+  // ------------------------------------------------------------
+  console.log("🌐 Opening:", nextUrl);
 
-      nextUrl = result.submitResponse.url;
-      console.log("🔗 Next URL:", nextUrl);
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+
+  try {
+    await page.goto(nextUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    // Wait for dynamic JS if needed — but safely ignore timeout
+    try {
+      await page.waitForFunction(
+        () => window.__QUIZ_JSON_LOADED__ === true,
+        { timeout: 3000 }
+      );
+    } catch {
+      console.log("⚠ Dynamic JS content not fully loaded (timeout ignored)");
     }
+
+    // Extract embedded quiz JSON (if present)
+    const quizJson = await extractQuizJSON(page);
 
     await browser.close();
+
+    if (!quizJson) {
+      console.log("❌ No quiz JSON found on page.");
+      return res.json({
+        ok: true,
+        quizUrl: url,
+        submitUrl: null,
+        answer: null,
+        reason: "no-json-found",
+        decodedPreview: await page.content()
+      });
+    }
+
+    console.log("📦 Quiz JSON found:", quizJson);
 
     return res.json({
       ok: true,
       quizUrl: url,
-      submitUrl: final?.submitUrl ?? null,
-      answer: final?.answer ?? null,
-      reason: final?.reason ?? null,
-      decodedPreview: final?.text ?? null,
-      submitResponse: final?.submitResponse ?? null
+      submitUrl: quizJson.submit,
+      answer: quizJson.answer ?? null,
+      reason: quizJson.reason ?? null,
+      decodedPreview: quizJson.preview ?? null
     });
 
   } catch (err) {
-    console.error("SERVER ERROR:", err);
-    return res.status(500).json({ error: "server-error", message: err.toString() });
+    await browser.close();
+    console.log("❌ Error:", err);
+    return res.json({
+      ok: false,
+      reason: "playwright-error",
+      error: String(err)
+    });
   }
 });
 
-//---------------------------------------------------------------------
-const PORT = process.env.PORT || 10000;
+// ============================================================
+// Start Server
+// ============================================================
 app.listen(PORT, () => {
   console.log(`✨ Server running on port ${PORT}`);
 });
