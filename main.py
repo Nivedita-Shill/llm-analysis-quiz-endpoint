@@ -74,36 +74,6 @@ The script MUST print informative status messages to STDOUT at every step so the
 
 Your entire output must be only the complete, runnable Python code block.
 """
-The script must define a function that loops recursively or iteratively to handle multiple quiz steps.
-The script will be executed in an environment where the following variables are available:
-- `AI_PIPE_TOKEN`: API Token for the LLM.
-- `USER_EMAIL`: The user's email ({user_email}).
-- `SECRET_KEY`: The user's secret key.
-- `START_QUIZ_URL`: The initial URL to visit ({start_url}).
-
-**Script Requirements:**
-1. **Imports:** Use `httpx`, `os`, `json`, `base64`, `time`, `re`.
-2. **Time Limit:** The script must run a loop. Inside the loop, check if `time.time() - start_time > 150` (seconds). If so, exit gracefully.
-3. **Fetch & Parse:** - GET the current quiz URL.
-    - Extract the **Question** and **Submission URL** from the HTML. 
-    - handle cases where content is inside `innerHTML = atob(...)` (Base64 encoded).
-4. **Solve (LLM Call):**
-    - Call the LLM API ({AI_PIPE_URL}) using `AI_PIPE_TOKEN` to answer the extracted question.
-    - The prompt to the inner LLM should be simple: "Answer this question concisely: [Question]".
-5. **Submit:**
-    - POST the answer to the extracted Submission URL.
-    - Payload format: `{{ "email": "{user_email}", "secret": os.getenv("SECRET_KEY"), "url": current_quiz_url, "answer": llm_answer }}`.
-6. **Iterate:**
-    - Parse the submission response JSON.
-    - If it contains a `"url"` key, update the `current_quiz_url` and **repeat the loop**.
-    - If no URL is returned or `correct` is False (and no new URL), exit.
-
-**Output Format:**
-- Return ONLY the raw Python code. 
-- Do NOT use Markdown formatting (no ```python).
-- Do NOT add explanations.
-"""
-
     # 1. Generate the Script
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
