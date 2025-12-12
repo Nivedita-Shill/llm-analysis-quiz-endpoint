@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 # Load all required variables from the environment
 SECRET_KEY = os.getenv("SECRET_KEY")
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-# FIX 1: Ensure USER_EMAIL is loaded globally from the .env file
 USER_EMAIL = os.getenv("USER_EMAIL")
 AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o") # Or "gpt-4-turbo", etc.
@@ -38,15 +37,33 @@ async def generate_and_run_solver(data: QuizRequest):
     1. Asks an LLM to write a Python script to solve the quiz loop (The Programmer LLM).
     2. Executes that script in a subprocess.
     """
-    # The email and URL come from the incoming request payload
     user_email = data.email
     start_url = data.url
     
     logger.info(f"Processing task for {user_email} at {start_url}")
 
-    # --- THE PROGRAMMER PROMPT ---
-    # This instructs the LLM to write the recursive solver script
-    prompt = f"""
+    # 1. Generate the Script
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            
+            # --- START TEMPORARY NETWORK TEST ---
+            TEST_URL = "https://www.google.com"
+            try:
+                test_response = await client.get(TEST_URL, timeout=10.0)
+                test_response.raise_for_status()
+                logger.info(f"SUCCESS: External network connection to {TEST_URL} is confirmed.")
+            except Exception as e:
+                logger.error(f"FATAL NETWORK FAILURE: Cannot reach {TEST_URL}. Render container network is down or blocked: {e}")
+                return # Stop processing if basic network fails
+            # --- END TEMPORARY NETWORK TEST ---
+            
+            # --- ORIGINAL LLM POST REQUEST ---
+            response = await client.post(
+                AI_PIPE_URL,
+                headers={"Authorization": f"Bearer {AI_PIPE_TOKEN}"},
+                json={
+                    "model": LLM_MODEL,
+                    "messages": [{"role": "system", "content": f"""
 You are an expert Python script generator. Your task is to write a standalone **Python 3 script** that solves a sequence of data science quizzes.
 
 The script must define a function that loops recursively or iteratively to handle multiple quiz steps.
@@ -77,17 +94,7 @@ The script will be executed in an environment where the following variables are 
 - Return ONLY the raw Python code. 
 - Do NOT use Markdown formatting (no ```python).
 - Do NOT add explanations.
-"""
-
-    # 1. Generate the Script
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                AI_PIPE_URL,
-                headers={"Authorization": f"Bearer {AI_PIPE_TOKEN}"},
-                json={
-                    "model": LLM_MODEL,
-                    "messages": [{"role": "system", "content": prompt}],
+"""}],
                     "temperature": 0.1
                 }
             )
@@ -110,8 +117,6 @@ The script will be executed in an environment where the following variables are 
     env_vars = os.environ.copy()
     env_vars["START_QUIZ_URL"] = start_url
     env_vars["USER_EMAIL"] = user_email
-    
-    # FIX 2: Explicitly pass global secrets to the subprocess environment
     env_vars["SECRET_KEY"] = SECRET_KEY 
     env_vars["AI_PIPE_TOKEN"] = AI_PIPE_TOKEN
     
