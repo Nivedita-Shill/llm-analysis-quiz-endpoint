@@ -22,8 +22,9 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
 # FIX 1: Ensure USER_EMAIL is loaded globally from the .env file
 USER_EMAIL = os.getenv("USER_EMAIL")
+# Note: AI_PIPE_URL will use your environment variable override (e.g., https://aipipe.org/...)
 AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o") # Or "gpt-4-turbo", etc.
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o") # Or "gpt-3.5-turbo", etc.
 
 app = FastAPI()
 
@@ -45,7 +46,7 @@ async def generate_and_run_solver(data: QuizRequest):
     logger.info(f"Processing task for {user_email} at {start_url}")
 
     # --- THE PROGRAMMER PROMPT ---
-    # This instructs the LLM to write the recursive solver script
+    # This instructs the LLM to write the recursive solver script with required logging
     prompt = f"""
 You are an expert Python script generator. Your task is to write a single, standalone Python 3 script using the standard 'requests' library (do NOT use 'httpx' or 'asyncio') that solves a sequence of data science quizzes.
 
@@ -61,22 +62,23 @@ The script MUST define a single function, `solve_quiz_sequence()`, and call it a
 The script MUST print informative status messages to STDOUT at every step so the calling program can monitor progress.
 
 1.  **Start:** Print the starting URL.
-    * **Format:** `print(f"START: Initial URL is {start_url}")`
+    * **Format:** print(f"START: Initial URL is {{start_url}}")
 2.  **Submission:** Before every POST request, print the current task number and the answer found.
-    * **Format:** `print(f"TASK {{task_number}}: Submitting to {{current_url}} with Answer: {{answer}}")`
+    * **Format:** print(f"TASK {{task_number}}: Submitting to {{current_url}} with Answer: {{answer}}")
 3.  **Success/Failure:** After every submission, print the server's response content.
-    * **Format:** `print(f"RESPONSE: {{response.text}}")`
+    * **Format:** print(f"RESPONSE: {{response.text}}")
 4.  **Error Handling:** Use a `try...except` block to catch any `requests` exceptions (like connection errors) or internal script errors.
-    * **Format:** On exception, the script must print a full error message: `print(f"ERROR: {e}")` and then **STOP**.
+    * **Format:** On exception, the script must print a full error message: print(f"ERROR: {{e}}") and then **STOP**.
 5.  **Stop Condition:** The script must explicitly report its reason for exiting the loop.
-    * **SUCCESS Stop:** If the response does NOT contain a 'url' key, print: `print("FINAL STATUS: ***QUIZ SEQUENCE COMPLETE***")`
-    * **FAILURE Stop:** If a task response is incorrect or an error occurs, print: `print("FINAL STATUS: !!!SEQUENCE FAILED/STOPPED!!!")`
+    * **SUCCESS Stop:** If the response does NOT contain a 'url' key, print: print("FINAL STATUS: ***QUIZ SEQUENCE COMPLETE***")
+    * **FAILURE Stop:** If a task response is incorrect or an error occurs, print: print("FINAL STATUS: !!!SEQUENCE FAILED/STOPPED!!!")
 
 Your entire output must be only the complete, runnable Python code block.
 """
     # 1. Generate the Script
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Use httpx.AsyncClient without 'verify=False' since DNS is resolved now
+        async with httpx.AsyncClient(timeout=30.0) as client: 
             response = await client.post(
                 AI_PIPE_URL,
                 headers={"Authorization": f"Bearer {AI_PIPE_TOKEN}"},
@@ -120,7 +122,8 @@ Your entire output must be only the complete, runnable Python code block.
             timeout=170 # Hard timeout slightly larger than the internal 150s check
         )
         logger.info("Script finished.")
-        logger.info(f"STDOUT: {result.stdout}")
+        # Logs the detailed output from the generated solver script!
+        logger.info(f"STDOUT: {result.stdout}") 
         if result.stderr:
             logger.error(f"STDERR: {result.stderr}")
             
