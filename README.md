@@ -1,7 +1,9 @@
 🚀 LLM Analysis Quiz Solver
+
 This project implements an automated, iterative agent designed to solve a sequence of data sourcing, preparation, and analysis quizzes using a Large Language Model (LLM) within a strict time limit. The application is built using FastAPI to serve a public endpoint and executes the quiz-solving logic in the background via a dynamically generated Python script.
 
 📝 Project Overview
+
 The primary goal is to accept a quiz task via a POST request, rapidly analyze the initial quiz page, and then enter an iterative loop to solve multiple linked quizzes until the task sequence is complete or the 3-minute time limit is reached.
 
 Key features include:
@@ -46,7 +48,7 @@ SECRET_KEY="your_google_form_secret_string"
 AI_PIPE_TOKEN="your_ai_pipe_access_token" 
 
 # The email associated with your token/quiz submission
-USER_EMAIL="your_registered_email@ds.study.iitm.ac.in" 
+USER_EMAIL="24f1001642@ds.study.iitm.ac.in" 
 
 # Optional: Configuration for the LLM service
 AI_PIPE_URL=https://api.pip.ai/v1/chat/completions
