@@ -1,165 +1,172 @@
 import os
-import httpx
-import subprocess
-import sys
+import time
+import base64
+import json
 import logging
-from typing import Optional, Dict, Any
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from dotenv import load_dotenv
+from typing import Any, Dict
 
-# Load environment variables from .env file
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+
+# =====================
+# Environment & Config
+# =====================
 load_dotenv()
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# --- Configuration ---
-# Load all required variables from the environment
 SECRET_KEY = os.getenv("SECRET_KEY")
-AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-# FIX 1: Ensure USER_EMAIL is loaded globally from the .env file
 USER_EMAIL = os.getenv("USER_EMAIL")
-# Note: AI_PIPE_URL will use your environment variable override (e.g., https://aipipe.org/...)
-AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o") # Or "gpt-3.5-turbo", etc.
+AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
+AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://aipipe.org/openrouter/v1/chat/completions")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
+
+if not SECRET_KEY or not USER_EMAIL:
+    raise RuntimeError("SECRET_KEY and USER_EMAIL must be set in environment")
+
+# =====================
+# App & Logging
+# =====================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("tds-llm-quiz")
 
 app = FastAPI()
 
-class QuizRequest(BaseModel):
-    email: str
-    secret: str
-    url: str
+TIME_LIMIT = 170  # seconds (safe margin under 3 minutes)
 
-async def generate_and_run_solver(data: QuizRequest):
+# =====================
+# Utility Functions
+# =====================
+
+def extract_text_from_js(html: str) -> str:
     """
-    Background task that:
-    1. Asks an LLM to write a Python script to solve the quiz loop (The Programmer LLM).
-    2. Executes that script in a subprocess.
+    Extracts Base64-encoded content inside atob(`...`) from script tags
+    and returns decoded text.
     """
-    # The email and URL come from the incoming request payload
-    user_email = data.email
-    start_url = data.url
-    
-    logger.info(f"Processing task for {user_email} at {start_url}")
+    soup = BeautifulSoup(html, "lxml")
+    scripts = soup.find_all("script")
 
-    # --- THE PROGRAMMER PROMPT ---
-    # This instructs the LLM to write the recursive solver script with required logging
-    prompt = f"""
-You are an expert Python script generator. Your task is to write a single, standalone Python 3 script using the standard 'requests' library (do NOT use 'httpx' or 'asyncio') that solves a sequence of data science quizzes.
+    for script in scripts:
+        if script.string and "atob(" in script.string:
+            try:
+                encoded = script.string.split("atob(", 1)[1]
+                encoded = encoded.split(")", 1)[0].strip("`'\"")
+                decoded = base64.b64decode(encoded).decode("utf-8", errors="ignore")
+                return decoded
+            except Exception:
+                continue
 
-The script MUST define a single function, `solve_quiz_sequence()`, and call it at the end of the script.
+    # Fallback: visible text
+    return soup.get_text("\n", strip=True)
 
-### QUIZ GOALS AND LOGIC
-1. Start: The script begins at the URL: {start_url}.
-2. Loop: It must continually POST to the submission endpoint (https://tds-llm-analysis.s-anand.net/submit) until no 'url' key is returned in the response.
-3. Authentication: Use the email '{user_email}' and the secret '{{secret}}'.
-4. Answer Generation: For each new task URL, the script must fetch the HTML content using 'requests', extract the task, generate the correct answer, and submit it. The script must use 'BeautifulSoup' for HTML parsing.
 
-### CRITICAL LOGGING REQUIREMENTS (MUST USE print() TO STDOUT)
-The script MUST print informative status messages to STDOUT at every step so the calling program can monitor progress.
+async def ask_llm(question: str) -> Any:
+    """Ask LLM to compute the final answer."""
+    headers = {
+        "Authorization": f"Bearer {AI_PIPE_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
-1. Start: Print the starting URL.
-    * Format: print(f"START: Initial URL is {{start_url}}")
-2. Submission: Before every POST request, print the current task number and the answer found.
-    * Format: print(f"TASK {{task_number}}: Submitting to {{current_url}} with Answer: {{answer}}")
-3. Success/Failure: After every submission, print the server's response content.
-    * Format: print(f"RESPONSE: {{response.text}}")
-4. Robust Request and Error Handling: The script MUST perform two checks:
-    - Request Failure (Try/Except): It must wrap every 'requests.get' or 'requests.post' in a single `try...except requests.exceptions.RequestException` block. If the request fails (e.g., timeout, connection error), it must print the full exception: print(f"ERROR: REQUEST FAILED: {{e}}") and then exit the loop immediately with the FAILURE status.
-    - Content Check (Post-Request): After a successful request, it MUST check the HTTP status code. If `response.status_code` is NOT 200, or if the content is not parsable, the script MUST print: print(f"ERROR: BAD RESPONSE: Status {{response.status_code}}. Content: {{response.text}}") and exit the loop immediately with the FAILURE status.
-5. Stop Condition: The script must explicitly report its reason for exiting the loop.
-    * SUCCESS Stop: If the response does NOT contain a 'url' key, print: print("FINAL STATUS: ***QUIZ SEQUENCE COMPLETE***")
-    * FAILURE Stop: If a task response is incorrect or an error occurs, print: print("FINAL STATUS: !!!SEQUENCE FAILED/STOPPED!!!")
+    prompt = (
+        "You are solving a data analysis quiz. "
+        "Follow the instructions exactly and return ONLY the final answer.\n\n"
+        f"QUESTION:\n{question}"
+    )
 
-Your entire output must be only the complete, runnable Python code block.
-"""
-    # 1. Generate the Script
-    try:
-        # Use httpx.AsyncClient without 'verify=False' since DNS is resolved now
-        async with httpx.AsyncClient(timeout=30.0) as client: 
-            response = await client.post(
-                AI_PIPE_URL,
-                headers={"Authorization": f"Bearer {AI_PIPE_TOKEN}"},
-                json={
-                    "model": LLM_MODEL,
-                    "messages": [{"role": "system", "content": prompt}],
-                    "temperature": 0.1
-                }
-            )
-            response.raise_for_status()
-            
-            # Extract code (handling potential markdown wrappers just in case)
-            generated_code = response.json()["choices"][0]["message"]["content"]
-            generated_code = generated_code.replace("```python", "").replace("```", "").strip()
-            
-    except Exception as e:
-        logger.error(f"Failed to generate script: {e}")
-        return
-
-    # 2. Save Code to File
-    filename = f"solver_{user_email.split('@')[0]}.py"
-    with open(filename, "w") as f:
-        f.write(generated_code)
-    
-    # 3. Execute the Script
-    env_vars = os.environ.copy()
-    env_vars["START_QUIZ_URL"] = start_url
-    env_vars["USER_EMAIL"] = user_email
-    
-    # FIX 2: Explicitly pass global secrets to the subprocess environment
-    env_vars["SECRET_KEY"] = SECRET_KEY 
-    env_vars["AI_PIPE_TOKEN"] = AI_PIPE_TOKEN
-    
-    try:
-        logger.info(f"Running generated script: {filename}")
-        result = subprocess.run(
-            [sys.executable, filename],
-            env=env_vars,
-            capture_output=True,
-            text=True,
-            timeout=170 # Hard timeout slightly larger than the internal 150s check
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            AI_PIPE_URL,
+            headers=headers,
+            json={
+                "model": LLM_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+            },
         )
-        logger.info("Script finished.")
-        # Logs the detailed output from the generated solver script!
-        logger.info(f"STDOUT: {result.stdout}") 
-        if result.stderr:
-            logger.error(f"STDERR: {result.stderr}")
-            
-    except subprocess.TimeoutExpired:
-        logger.error("Script timed out externally.")
-    except Exception as e:
-        logger.error(f"Error executing script: {e}")
-    finally:
-        # Cleanup: Ensure temporary file is deleted
-        if os.path.exists(filename):
-            os.remove(filename)
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"].strip()
 
+    # Try JSON parse if possible
+    try:
+        return json.loads(content)
+    except Exception:
+        return content
+
+
+async def solve_quiz(start_url: str) -> Dict[str, Any]:
+    start_time = time.time()
+    current_url = start_url
+    last_response: Dict[str, Any] = {}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        while current_url:
+            if time.time() - start_time > TIME_LIMIT:
+                raise TimeoutError("Time limit exceeded")
+
+            logger.info(f"Fetching quiz page: {current_url}")
+            r = await client.get(current_url)
+            r.raise_for_status()
+
+            question_text = extract_text_from_js(r.text)
+            logger.info(f"Extracted question text")
+
+            answer = await ask_llm(question_text)
+            logger.info(f"Computed answer: {answer}")
+
+            # Find submit URL inside decoded content
+            submit_url = None
+            for line in question_text.splitlines():
+                if line.strip().startswith("http") and "submit" in line:
+                    submit_url = line.strip()
+                    break
+
+            if not submit_url:
+                raise ValueError("Submit URL not found in quiz text")
+
+            payload = {
+                "email": USER_EMAIL,
+                "secret": SECRET_KEY,
+                "url": current_url,
+                "answer": answer,
+            }
+
+            logger.info(f"Submitting answer to {submit_url}")
+            resp = await client.post(submit_url, json=payload)
+            resp.raise_for_status()
+            last_response = resp.json()
+            logger.info(f"Submission response: {last_response}")
+
+            current_url = last_response.get("url")
+
+    return last_response
+
+
+# =====================
+# API Endpoint
+# =====================
 @app.post("/quiztasks")
-async def handle_quiz_task(request: Request, background_tasks: BackgroundTasks):
-    # Manual JSON parsing to handle potential errors gracefully as per spec
+async def quiztasks(request: Request):
     try:
         body = await request.json()
-    except:
-        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
-    # Validation
     if body.get("secret") != SECRET_KEY:
-        return JSONResponse(status_code=403, content={"detail": "Invalid Secret"})
-    
-    try:
-        data = QuizRequest(**body)
-    except:
-        return JSONResponse(status_code=400, content={"detail": "Missing fields"})
+        return JSONResponse(status_code=403, content={"error": "Invalid secret"})
 
-    # Add to background tasks
-    background_tasks.add_task(generate_and_run_solver, data)
-    
-    return JSONResponse(status_code=200, content={"message": "Task received. Processing."})
+    if body.get("email") != USER_EMAIL or "url" not in body:
+        return JSONResponse(status_code=400, content={"error": "Missing fields"})
+
+    try:
+        result = await solve_quiz(body["url"])
+        return JSONResponse(status_code=200, content=result)
+    except Exception as e:
+        logger.exception("Quiz solving failed")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 if __name__ == "__main__":
     import uvicorn
-    # When deploying to Render, change port to 10000
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
