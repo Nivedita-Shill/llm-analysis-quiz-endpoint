@@ -81,7 +81,7 @@ The script will be executed in an environment where the following variables are 
 
     # 1. Generate the Script
     try:
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 AI_PIPE_URL,
                 headers={"Authorization": f"Bearer {AI_PIPE_TOKEN}"},
