@@ -47,8 +47,33 @@ async def generate_and_run_solver(data: QuizRequest):
     # --- THE PROGRAMMER PROMPT ---
     # This instructs the LLM to write the recursive solver script
     prompt = f"""
-You are an expert Python script generator. Your task is to write a standalone **Python 3 script** that solves a sequence of data science quizzes.
+You are an expert Python script generator. Your task is to write a single, standalone Python 3 script using the standard 'requests' library (do NOT use 'httpx' or 'asyncio') that solves a sequence of data science quizzes.
 
+The script MUST define a single function, `solve_quiz_sequence()`, and call it at the end of the script.
+
+### 🎯 QUIZ GOALS & LOGIC
+1.  **Start:** The script begins at the URL: {start_url}.
+2.  **Loop:** It must continually POST to the submission endpoint (https://tds-llm-analysis.s-anand.net/submit) until no 'url' key is returned in the response.
+3.  **Authentication:** Use the email '{user_email}' and the secret '{{secret}}'.
+4.  **Answer Generation:** For each new task URL, the script must fetch the HTML content, extract the task, generate the correct answer, and submit it.
+
+### 🪵 CRITICAL LOGGING REQUIREMENTS (MUST USE print() TO STDOUT)
+The script MUST print informative status messages to STDOUT at every step so the calling program can monitor progress.
+
+1.  **Start:** Print the starting URL.
+    * **Format:** `print(f"START: Initial URL is {start_url}")`
+2.  **Submission:** Before every POST request, print the current task number and the answer found.
+    * **Format:** `print(f"TASK {{task_number}}: Submitting to {{current_url}} with Answer: {{answer}}")`
+3.  **Success/Failure:** After every submission, print the server's response content.
+    * **Format:** `print(f"RESPONSE: {{response.text}}")`
+4.  **Error Handling:** Use a `try...except` block to catch any `requests` exceptions (like connection errors) or internal script errors.
+    * **Format:** On exception, the script must print a full error message: `print(f"ERROR: {e}")` and then **STOP**.
+5.  **Stop Condition:** The script must explicitly report its reason for exiting the loop.
+    * **SUCCESS Stop:** If the response does NOT contain a 'url' key, print: `print("FINAL STATUS: ***QUIZ SEQUENCE COMPLETE***")`
+    * **FAILURE Stop:** If a task response is incorrect or an error occurs, print: `print("FINAL STATUS: !!!SEQUENCE FAILED/STOPPED!!!")`
+
+Your entire output must be only the complete, runnable Python code block.
+"""
 The script must define a function that loops recursively or iteratively to handle multiple quiz steps.
 The script will be executed in an environment where the following variables are available:
 - `AI_PIPE_TOKEN`: API Token for the LLM.
