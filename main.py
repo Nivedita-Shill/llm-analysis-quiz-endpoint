@@ -52,27 +52,27 @@ You are an expert Python script generator. Your task is to write a single, stand
 
 The script MUST define a single function, `solve_quiz_sequence()`, and call it at the end of the script.
 
-### 🎯 QUIZ GOALS & LOGIC
-1.  **Start:** The script begins at the URL: {start_url}.
-2.  **Loop:** It must continually POST to the submission endpoint (https://tds-llm-analysis.s-anand.net/submit) until no 'url' key is returned in the response.
-3.  **Authentication:** Use the email '{user_email}' and the secret '{{secret}}'.
-4.  **Answer Generation:** For each new task URL, the script must fetch the HTML content, extract the task, generate the correct answer, and submit it.
+### QUIZ GOALS AND LOGIC
+1. Start: The script begins at the URL: {start_url}.
+2. Loop: It must continually POST to the submission endpoint (https://tds-llm-analysis.s-anand.net/submit) until no 'url' key is returned in the response.
+3. Authentication: Use the email '{user_email}' and the secret '{{secret}}'.
+4. Answer Generation: For each new task URL, the script must fetch the HTML content using 'requests', extract the task, generate the correct answer, and submit it. The script must use 'BeautifulSoup' for HTML parsing.
 
-### 🪵 CRITICAL LOGGING REQUIREMENTS (MUST USE print() TO STDOUT)
+### CRITICAL LOGGING REQUIREMENTS (MUST USE print() TO STDOUT)
 The script MUST print informative status messages to STDOUT at every step so the calling program can monitor progress.
 
-1.  **Start:** Print the starting URL.
-    * **Format:** print(f"START: Initial URL is {{start_url}}")
-2.  **Submission:** Before every POST request, print the current task number and the answer found.
-    * **Format:** print(f"TASK {{task_number}}: Submitting to {{current_url}} with Answer: {{answer}}")
-3.  **Success/Failure:** After every submission, print the server's response content.
-    * **Format:** print(f"RESPONSE: {{response.text}}")
-4.  **Robust Request and Error Handling:** The script MUST perform two checks:
-    a. **Request Failure (Try/Except):** It must wrap every 'requests.get' or 'requests.post' in a single `try...except requests.exceptions.RequestException` block. If the request fails (e.g., timeout, connection error), it must print the full exception: `print(f"ERROR: REQUEST FAILED: {e}")` and then **exit the loop immediately** with the FAILURE status.
-    b. **Content Check (Post-Request):** After a successful request, it MUST check the HTTP status code. If `response.status_code` is NOT 200, or if the content is not parsable, the script MUST print: `print(f"ERROR: BAD RESPONSE: Status {response.status_code}. Content: {response.text}")` and exit the loop immediately with the FAILURE status.
-5.  **Stop Condition:** The script must explicitly report its reason for exiting the loop.
-    * **SUCCESS Stop:** If the response does NOT contain a 'url' key, print: print("FINAL STATUS: ***QUIZ SEQUENCE COMPLETE***")
-    * **FAILURE Stop:** If a task response is incorrect or an error occurs, print: print("FINAL STATUS: !!!SEQUENCE FAILED/STOPPED!!!")
+1. Start: Print the starting URL.
+    * Format: print(f"START: Initial URL is {{start_url}}")
+2. Submission: Before every POST request, print the current task number and the answer found.
+    * Format: print(f"TASK {{task_number}}: Submitting to {{current_url}} with Answer: {{answer}}")
+3. Success/Failure: After every submission, print the server's response content.
+    * Format: print(f"RESPONSE: {{response.text}}")
+4. Robust Request and Error Handling: The script MUST perform two checks:
+    - Request Failure (Try/Except): It must wrap every 'requests.get' or 'requests.post' in a single `try...except requests.exceptions.RequestException` block. If the request fails (e.g., timeout, connection error), it must print the full exception: print(f"ERROR: REQUEST FAILED: {{e}}") and then exit the loop immediately with the FAILURE status.
+    - Content Check (Post-Request): After a successful request, it MUST check the HTTP status code. If `response.status_code` is NOT 200, or if the content is not parsable, the script MUST print: print(f"ERROR: BAD RESPONSE: Status {{response.status_code}}. Content: {{response.text}}") and exit the loop immediately with the FAILURE status.
+5. Stop Condition: The script must explicitly report its reason for exiting the loop.
+    * SUCCESS Stop: If the response does NOT contain a 'url' key, print: print("FINAL STATUS: ***QUIZ SEQUENCE COMPLETE***")
+    * FAILURE Stop: If a task response is incorrect or an error occurs, print: print("FINAL STATUS: !!!SEQUENCE FAILED/STOPPED!!!")
 
 Your entire output must be only the complete, runnable Python code block.
 """
