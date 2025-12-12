@@ -9,16 +9,19 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration
+# --- Configuration ---
+# Load all required variables from the environment
 SECRET_KEY = os.getenv("SECRET_KEY")
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
+# FIX 1: Ensure USER_EMAIL is loaded globally from the .env file
+USER_EMAIL = os.getenv("USER_EMAIL")
 AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o") # Or "gpt-4-turbo", etc.
 
@@ -32,9 +35,10 @@ class QuizRequest(BaseModel):
 async def generate_and_run_solver(data: QuizRequest):
     """
     Background task that:
-    1. Asks an LLM to write a Python script to solve the quiz loop.
+    1. Asks an LLM to write a Python script to solve the quiz loop (The Programmer LLM).
     2. Executes that script in a subprocess.
     """
+    # The email and URL come from the incoming request payload
     user_email = data.email
     start_url = data.url
     
@@ -56,18 +60,18 @@ The script will be executed in an environment where the following variables are 
 1. **Imports:** Use `httpx`, `os`, `json`, `base64`, `time`, `re`.
 2. **Time Limit:** The script must run a loop. Inside the loop, check if `time.time() - start_time > 150` (seconds). If so, exit gracefully.
 3. **Fetch & Parse:** - GET the current quiz URL.
-   - Extract the **Question** and **Submission URL** from the HTML. 
-   - handle cases where content is inside `innerHTML = atob(...)` (Base64 encoded).
+    - Extract the **Question** and **Submission URL** from the HTML. 
+    - handle cases where content is inside `innerHTML = atob(...)` (Base64 encoded).
 4. **Solve (LLM Call):**
-   - Call the LLM API ({AI_PIPE_URL}) using `AI_PIPE_TOKEN` to answer the extracted question.
-   - The prompt to the inner LLM should be simple: "Answer this question concisely: [Question]".
+    - Call the LLM API ({AI_PIPE_URL}) using `AI_PIPE_TOKEN` to answer the extracted question.
+    - The prompt to the inner LLM should be simple: "Answer this question concisely: [Question]".
 5. **Submit:**
-   - POST the answer to the extracted Submission URL.
-   - Payload format: `{{ "email": "{user_email}", "secret": os.getenv("SECRET_KEY"), "url": current_quiz_url, "answer": llm_answer }}`.
+    - POST the answer to the extracted Submission URL.
+    - Payload format: `{{ "email": "{user_email}", "secret": os.getenv("SECRET_KEY"), "url": current_quiz_url, "answer": llm_answer }}`.
 6. **Iterate:**
-   - Parse the submission response JSON.
-   - If it contains a `"url"` key, update the `current_quiz_url` and **repeat the loop**.
-   - If no URL is returned or `correct` is False (and no new URL), exit.
+    - Parse the submission response JSON.
+    - If it contains a `"url"` key, update the `current_quiz_url` and **repeat the loop**.
+    - If no URL is returned or `correct` is False (and no new URL), exit.
 
 **Output Format:**
 - Return ONLY the raw Python code. 
@@ -106,7 +110,10 @@ The script will be executed in an environment where the following variables are 
     env_vars = os.environ.copy()
     env_vars["START_QUIZ_URL"] = start_url
     env_vars["USER_EMAIL"] = user_email
-    # SECRET_KEY and AI_PIPE_TOKEN are already in os.environ, but ensuring they are passed
+    
+    # FIX 2: Explicitly pass global secrets to the subprocess environment
+    env_vars["SECRET_KEY"] = SECRET_KEY 
+    env_vars["AI_PIPE_TOKEN"] = AI_PIPE_TOKEN
     
     try:
         logger.info(f"Running generated script: {filename}")
@@ -127,7 +134,7 @@ The script will be executed in an environment where the following variables are 
     except Exception as e:
         logger.error(f"Error executing script: {e}")
     finally:
-        # Cleanup
+        # Cleanup: Ensure temporary file is deleted
         if os.path.exists(filename):
             os.remove(filename)
 
@@ -155,4 +162,5 @@ async def handle_quiz_task(request: Request, background_tasks: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
+    # When deploying to Render, change port to 10000
     uvicorn.run(app, host="0.0.0.0", port=8000)
