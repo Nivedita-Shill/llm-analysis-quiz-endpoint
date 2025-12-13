@@ -20,7 +20,7 @@ load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 USER_EMAIL = os.getenv("USER_EMAIL")
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
+AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://aipipe.org/openrouter/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 # Optional but STRONGLY recommended
