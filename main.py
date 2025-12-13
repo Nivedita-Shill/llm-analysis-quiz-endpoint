@@ -122,7 +122,7 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
                         "secret": SECRET_KEY,
                         "url": current_url,
                         # IMPORTANT: answer must NOT be null
-                        "answer": ""
+                        "answer": "12345"
                     }
 
                     resp = await client.post(GLOBAL_SUBMIT_URL, json=payload)
