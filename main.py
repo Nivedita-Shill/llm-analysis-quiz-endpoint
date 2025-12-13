@@ -20,16 +20,19 @@ load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 USER_EMAIL = os.getenv("USER_EMAIL")
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://aipipe.org/openrouter/v1/chat/completions")
+AI_PIPE_URL = os.getenv(
+    "AI_PIPE_URL",
+    "https://aipipe.org/openrouter/v1/chat/completions",
+)
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
-# Optional but STRONGLY recommended
+# Optional (rate-limit protection)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 if not SECRET_KEY or not USER_EMAIL or not AI_PIPE_TOKEN:
     raise RuntimeError("SECRET_KEY, USER_EMAIL, AI_PIPE_TOKEN must be set")
 
-TIME_LIMIT = 170  # seconds (< 3 minutes)
+TIME_LIMIT = 170  # seconds
 GLOBAL_SUBMIT_URL = "https://tds-llm-analysis.s-anand.net/submit"
 
 # =====================
@@ -41,11 +44,19 @@ logger = logging.getLogger("quiz")
 app = FastAPI()
 
 # =====================
+# Health check (RENDER FIX)
+# =====================
+@app.get("/")
+@app.head("/")
+def health():
+    return {"status": "ok"}
+
+# =====================
 # Helpers
 # =====================
 def extract_text_from_js(html: str) -> str:
-    """Decode Base64 content embedded via atob(`...`)"""
-    soup = BeautifulSoup(html, "lxml")
+    """Decode Base64 content embedded via atob(`...`)."""
+    soup = BeautifulSoup(html, "html.parser")
     for script in soup.find_all("script"):
         if script.string and "atob(" in script.string:
             try:
@@ -58,7 +69,7 @@ def extract_text_from_js(html: str) -> str:
 
 
 async def ask_llm(prompt: str) -> Any:
-    """Ask LLM and return ONLY final answer"""
+    """Ask LLM and return best-effort final answer."""
     headers = {
         "Authorization": f"Bearer {AI_PIPE_TOKEN}",
         "Content-Type": "application/json",
@@ -90,36 +101,30 @@ async def ask_llm(prompt: str) -> Any:
 
 
 # =====================
-# Final GitHub Task Solver
+# Final GitHub Task Solver (NON-BLOCKING)
 # =====================
 async def solve_github_last_task(text: str) -> int:
     """
     FINAL non-blocking task solver.
     - NEVER raises
-    - ALWAYS returns an int
-    - Best-effort deterministic logic
-    - Graceful LLM fallback
+    - ALWAYS returns int
     """
 
     email_offset = len(USER_EMAIL) % 2
-
-    # -----------------------------
-    # 1️⃣ Try regex extraction
-    # -----------------------------
     repo = None
+
+    # 1️⃣ Regex extraction
     try:
         match = re.search(
             r"https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
-            text
+            text,
         )
         if match:
             repo = match.group(1).strip()
     except Exception:
         pass
 
-    # -----------------------------
     # 2️⃣ LLM extraction fallback
-    # -----------------------------
     if not repo:
         try:
             extracted = await ask_llm(
@@ -131,9 +136,7 @@ async def solve_github_last_task(text: str) -> int:
         except Exception:
             pass
 
-    # -----------------------------
-    # 3️⃣ Try GitHub API (best effort)
-    # -----------------------------
+    # 3️⃣ Best-effort GitHub API
     if repo:
         headers = {}
         if GITHUB_TOKEN:
@@ -142,24 +145,24 @@ async def solve_github_last_task(text: str) -> int:
         async with httpx.AsyncClient(timeout=20) as client:
             for ref in ("main", "master"):
                 try:
-                    url = f"https://api.github.com/repos/{repo}/git/trees/{ref}?recursive=1"
+                    url = (
+                        f"https://api.github.com/repos/"
+                        f"{repo}/git/trees/{ref}?recursive=1"
+                    )
                     r = await client.get(url, headers=headers)
-
                     if r.status_code == 200:
                         tree = r.json().get("tree", [])
                         md_count = sum(
-                            1 for item in tree
+                            1
+                            for item in tree
                             if item.get("type") == "blob"
                             and item.get("path", "").endswith(".md")
                         )
                         return md_count + email_offset
-
                 except Exception:
-                    pass  # swallow all GitHub errors
+                    pass
 
-    # -----------------------------
-    # 4️⃣ Absolute fallback: LLM solve
-    # -----------------------------
+    # 4️⃣ Absolute fallback: LLM
     try:
         answer = await ask_llm(
             "Solve the task below and return ONLY the final integer.\n\n"
@@ -170,11 +173,8 @@ async def solve_github_last_task(text: str) -> int:
     except Exception:
         pass
 
-    # -----------------------------
     # 5️⃣ Final safety net
-    # -----------------------------
     return email_offset
-
 
 
 # =====================
@@ -188,7 +188,7 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30) as client:
         while current_url:
             if time.time() - start_time > TIME_LIMIT:
-                raise TimeoutError("Time limit exceeded")
+                break
 
             logger.info(f"Fetching task: {current_url}")
             r = await client.get(current_url)
@@ -199,23 +199,20 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
 
             # ---- Minimal deterministic overrides ----
 
-            # Bootstrap
             if current_url.endswith("/project2") and not question:
                 answer = 0
 
-            # UV task
             elif "project2-uv" in current_url:
                 answer = (
                     f'uv http get '
-                    f'https://tds-llm-analysis.s-anand.net/project2/uv.json?email={USER_EMAIL} '
+                    f'https://tds-llm-analysis.s-anand.net/project2/uv.json'
+                    f'?email={USER_EMAIL} '
                     f'-H "Accept: application/json"'
                 )
 
-            # FINAL GitHub task
             elif "gh-tree" in current_url:
                 answer = await solve_github_last_task(decoded_text)
 
-            # Everything else → LLM
             else:
                 logger.info("Computing answer via LLM")
                 answer = await ask_llm(question)
@@ -262,8 +259,11 @@ async def quiztasks(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# =====================
+# Entrypoint
+# =====================
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
