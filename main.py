@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
 # =====================
-# Environment
+# Environment & Config
 # =====================
 load_dotenv()
 
@@ -24,36 +24,49 @@ AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 if not SECRET_KEY or not USER_EMAIL or not AI_PIPE_TOKEN:
-    raise RuntimeError("Missing env vars")
+    raise RuntimeError("SECRET_KEY, USER_EMAIL, AI_PIPE_TOKEN must be set")
 
-TIME_LIMIT = 170
+TIME_LIMIT = 170  # seconds (< 3 minutes)
 
 # =====================
-# App
+# App & Logging
 # =====================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("quiz")
 
 app = FastAPI()
 
+GLOBAL_SUBMIT_URL = "https://tds-llm-analysis.s-anand.net/submit"
+
 # =====================
 # Helpers
 # =====================
 def extract_text_from_js(html: str) -> str:
+    """
+    Decode Base64 content embedded via atob(`...`) in JS-rendered quiz pages.
+    """
     soup = BeautifulSoup(html, "lxml")
     for script in soup.find_all("script"):
         if script.string and "atob(" in script.string:
-            encoded = script.string.split("atob(", 1)[1]
-            encoded = encoded.split(")", 1)[0].strip("`'\"")
-            return base64.b64decode(encoded).decode("utf-8", errors="ignore")
+            try:
+                encoded = script.string.split("atob(", 1)[1]
+                encoded = encoded.split(")", 1)[0].strip("`'\"")
+                return base64.b64decode(encoded).decode("utf-8", errors="ignore")
+            except Exception:
+                pass
     return soup.get_text("\n", strip=True)
 
 
 async def ask_llm(question: str) -> Any:
+    """
+    Ask the LLM ONLY the question.
+    Return ONLY the final answer.
+    """
     headers = {"Authorization": f"Bearer {AI_PIPE_TOKEN}"}
+
     prompt = (
         "Return ONLY the final answer.\n"
-        "No explanation.\n\n"
+        "No explanation. No apology.\n\n"
         f"{question}"
     )
 
@@ -68,63 +81,95 @@ async def ask_llm(question: str) -> Any:
             },
         )
         r.raise_for_status()
-        out = r.json()["choices"][0]["message"]["content"].strip()
+        output = r.json()["choices"][0]["message"]["content"].strip()
 
     try:
-        return json.loads(out)
-    except:
-        return out
+        return json.loads(output)
+    except Exception:
+        return output
 
 
 # =====================
-# Solver
+# Core Solver
 # =====================
 async def solve_quiz(start_url: str) -> Dict[str, Any]:
-    start = time.time()
-    url = start_url
-    last = {}
+    start_time = time.time()
+    current_url = start_url
+    last_response: Dict[str, Any] = {}
 
     async with httpx.AsyncClient(timeout=30) as client:
-        while url:
-            if time.time() - start > TIME_LIMIT:
-                raise TimeoutError("Time exceeded")
+        while current_url:
+            if time.time() - start_time > TIME_LIMIT:
+                raise TimeoutError("Time limit exceeded")
 
-            r = await client.get(url)
+            logger.info(f"Fetching: {current_url}")
+            r = await client.get(current_url)
             r.raise_for_status()
 
-            text = extract_text_from_js(r.text)
+            decoded_text = extract_text_from_js(r.text)
 
-            submit_match = re.search(r"https?://[^\\s]+/submit", text)
+            # -------------------------------
+            # BOOTSTRAP CASE: /project2
+            # -------------------------------
+            submit_match = re.search(r"https?://[^\s]+/submit", decoded_text)
+
             if not submit_match:
-                raise ValueError("Submit URL not found")
+                if current_url.endswith("/project2"):
+                    logger.info("Bootstrap URL detected (/project2)")
 
+                    payload = {
+                        "email": USER_EMAIL,
+                        "secret": SECRET_KEY,
+                        "url": current_url,
+                        "answer": None
+                    }
+
+                    resp = await client.post(GLOBAL_SUBMIT_URL, json=payload)
+                    resp.raise_for_status()
+                    last_response = resp.json()
+
+                    current_url = last_response.get("url")
+                    continue
+                else:
+                    raise ValueError("Submit URL not found")
+
+            # -------------------------------
+            # NORMAL QUIZ PAGE
+            # -------------------------------
             submit_url = submit_match.group(0)
-            question = text.split("Post your answer", 1)[0].strip()
 
+            question = decoded_text.split("Post your answer", 1)[0].strip()
+
+            logger.info("Sending question to LLM")
             answer = await ask_llm(question)
+            logger.info(f"Answer: {answer}")
 
             payload = {
                 "email": USER_EMAIL,
                 "secret": SECRET_KEY,
-                "url": url,
+                "url": current_url,
                 "answer": answer,
             }
 
             resp = await client.post(submit_url, json=payload)
             resp.raise_for_status()
-            last = resp.json()
+            last_response = resp.json()
 
-            url = last.get("url")
+            logger.info(f"Response: {last_response}")
+            current_url = last_response.get("url")
 
-    return last
+    return last_response
 
 
 # =====================
-# API
+# API Endpoint
 # =====================
 @app.post("/quiztasks")
 async def quiztasks(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
     if body.get("secret") != SECRET_KEY:
         return JSONResponse(status_code=403, content={"error": "Invalid secret"})
@@ -136,7 +181,7 @@ async def quiztasks(request: Request):
         result = await solve_quiz(body["url"])
         return JSONResponse(status_code=200, content=result)
     except Exception as e:
-        logger.exception("Failed")
+        logger.exception("Quiz solving failed")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
