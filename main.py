@@ -27,6 +27,7 @@ if not SECRET_KEY or not USER_EMAIL or not AI_PIPE_TOKEN:
     raise RuntimeError("SECRET_KEY, USER_EMAIL, AI_PIPE_TOKEN must be set")
 
 TIME_LIMIT = 170  # seconds (< 3 minutes)
+GLOBAL_SUBMIT_URL = "https://tds-llm-analysis.s-anand.net/submit"
 
 # =====================
 # App & Logging
@@ -35,8 +36,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("quiz")
 
 app = FastAPI()
-
-GLOBAL_SUBMIT_URL = "https://tds-llm-analysis.s-anand.net/submit"
 
 # =====================
 # Helpers
@@ -59,8 +58,8 @@ def extract_text_from_js(html: str) -> str:
 
 async def ask_llm(question: str) -> Any:
     """
-    Ask the LLM ONLY the question.
-    Return ONLY the final answer.
+    Ask the LLM ONLY the question text.
+    Must return ONLY the final answer.
     """
     headers = {"Authorization": f"Bearer {AI_PIPE_TOKEN}"}
 
@@ -90,7 +89,7 @@ async def ask_llm(question: str) -> Any:
 
 
 # =====================
-# Core Solver
+# Core Solver (FINAL)
 # =====================
 async def solve_quiz(start_url: str) -> Dict[str, Any]:
     start_time = time.time()
@@ -108,11 +107,12 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
 
             decoded_text = extract_text_from_js(r.text)
 
-            # -------------------------------
-            # BOOTSTRAP CASE: /project2
-            # -------------------------------
+            # Try to find submit URL inside task text
             submit_match = re.search(r"https?://[^\s]+/submit", decoded_text)
 
+            # -------------------------------------------------
+            # BOOTSTRAP CASE: /project2
+            # -------------------------------------------------
             if not submit_match:
                 if current_url.endswith("/project2"):
                     logger.info("Bootstrap URL detected (/project2)")
@@ -121,7 +121,8 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
                         "email": USER_EMAIL,
                         "secret": SECRET_KEY,
                         "url": current_url,
-                        "answer": None
+                        # IMPORTANT: answer must NOT be null
+                        "answer": ""
                     }
 
                     resp = await client.post(GLOBAL_SUBMIT_URL, json=payload)
@@ -130,19 +131,21 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
 
                     current_url = last_response.get("url")
                     continue
-                else:
-                    raise ValueError("Submit URL not found")
 
-            # -------------------------------
+                # Any other page without submit URL is invalid
+                raise ValueError("Submit URL not found")
+
+            # -------------------------------------------------
             # NORMAL QUIZ PAGE
-            # -------------------------------
+            # -------------------------------------------------
             submit_url = submit_match.group(0)
 
+            # Extract only the question (strip instructions)
             question = decoded_text.split("Post your answer", 1)[0].strip()
 
             logger.info("Sending question to LLM")
             answer = await ask_llm(question)
-            logger.info(f"Answer: {answer}")
+            logger.info(f"Answer computed: {answer}")
 
             payload = {
                 "email": USER_EMAIL,
@@ -155,7 +158,7 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
             resp.raise_for_status()
             last_response = resp.json()
 
-            logger.info(f"Response: {last_response}")
+            logger.info(f"Submission response: {last_response}")
             current_url = last_response.get("url")
 
     return last_response
