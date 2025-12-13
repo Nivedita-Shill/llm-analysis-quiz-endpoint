@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
 # =====================
-# Environment & Config
+# Environment
 # =====================
 load_dotenv()
 
@@ -24,15 +24,15 @@ AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 if not SECRET_KEY or not USER_EMAIL or not AI_PIPE_TOKEN:
-    raise RuntimeError("SECRET_KEY, USER_EMAIL, and AI_PIPE_TOKEN must be set")
+    raise RuntimeError("Missing env vars")
 
-TIME_LIMIT = 170  # seconds (global, < 3 minutes)
+TIME_LIMIT = 170
 
 # =====================
-# App & Logging
+# App
 # =====================
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("tds-llm-quiz")
+logger = logging.getLogger("quiz")
 
 app = FastAPI()
 
@@ -40,36 +40,21 @@ app = FastAPI()
 # Helpers
 # =====================
 def extract_text_from_js(html: str) -> str:
-    """
-    Decode Base64 content embedded via atob(`...`) in JS-rendered quiz pages.
-    """
     soup = BeautifulSoup(html, "lxml")
     for script in soup.find_all("script"):
         if script.string and "atob(" in script.string:
-            try:
-                encoded = script.string.split("atob(", 1)[1]
-                encoded = encoded.split(")", 1)[0].strip("`'\"")
-                return base64.b64decode(encoded).decode("utf-8", errors="ignore")
-            except Exception:
-                pass
+            encoded = script.string.split("atob(", 1)[1]
+            encoded = encoded.split(")", 1)[0].strip("`'\"")
+            return base64.b64decode(encoded).decode("utf-8", errors="ignore")
     return soup.get_text("\n", strip=True)
 
 
 async def ask_llm(question: str) -> Any:
-    """
-    Ask the LLM ONLY the question.
-    Must return ONLY the final answer.
-    """
-    headers = {
-        "Authorization": f"Bearer {AI_PIPE_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
+    headers = {"Authorization": f"Bearer {AI_PIPE_TOKEN}"}
     prompt = (
-        "You are answering a data analysis question.\n"
         "Return ONLY the final answer.\n"
-        "No explanation. No apology.\n\n"
-        f"QUESTION:\n{question}"
+        "No explanation.\n\n"
+        f"{question}"
     )
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -83,73 +68,63 @@ async def ask_llm(question: str) -> Any:
             },
         )
         r.raise_for_status()
-        content = r.json()["choices"][0]["message"]["content"].strip()
+        out = r.json()["choices"][0]["message"]["content"].strip()
 
     try:
-        return json.loads(content)
-    except Exception:
-        return content
+        return json.loads(out)
+    except:
+        return out
 
 
 # =====================
-# Core Solver (Iterative)
+# Solver
 # =====================
 async def solve_quiz(start_url: str) -> Dict[str, Any]:
-    start_time = time.time()
-    current_url = start_url
-    last_response: Dict[str, Any] = {}
+    start = time.time()
+    url = start_url
+    last = {}
 
     async with httpx.AsyncClient(timeout=30) as client:
-        while current_url:
-            if time.time() - start_time > TIME_LIMIT:
-                raise TimeoutError("Time limit exceeded")
+        while url:
+            if time.time() - start > TIME_LIMIT:
+                raise TimeoutError("Time exceeded")
 
-            logger.info(f"Fetching quiz page: {current_url}")
-            r = await client.get(current_url)
+            r = await client.get(url)
             r.raise_for_status()
 
-            decoded_text = extract_text_from_js(r.text)
+            text = extract_text_from_js(r.text)
 
-            # Extract submit URL
-            match = re.search(r"https?://[^\s]+/submit", decoded_text)
-            if not match:
+            submit_match = re.search(r"https?://[^\\s]+/submit", text)
+            if not submit_match:
                 raise ValueError("Submit URL not found")
-            submit_url = match.group(0)
 
-            # Extract only the question
-            question = decoded_text.split("Post your answer", 1)[0].strip()
+            submit_url = submit_match.group(0)
+            question = text.split("Post your answer", 1)[0].strip()
 
-            logger.info("Sending question to LLM")
             answer = await ask_llm(question)
-            logger.info(f"Computed answer: {answer}")
 
             payload = {
                 "email": USER_EMAIL,
                 "secret": SECRET_KEY,
-                "url": current_url,
+                "url": url,
                 "answer": answer,
             }
 
-            logger.info(f"Submitting answer to {submit_url}")
             resp = await client.post(submit_url, json=payload)
             resp.raise_for_status()
-            last_response = resp.json()
+            last = resp.json()
 
-            logger.info(f"Submission response: {last_response}")
-            current_url = last_response.get("url")
+            url = last.get("url")
 
-    return last_response
+    return last
 
 
 # =====================
-# API Endpoint
+# API
 # =====================
 @app.post("/quiztasks")
 async def quiztasks(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    body = await request.json()
 
     if body.get("secret") != SECRET_KEY:
         return JSONResponse(status_code=403, content={"error": "Invalid secret"})
@@ -161,7 +136,7 @@ async def quiztasks(request: Request):
         result = await solve_quiz(body["url"])
         return JSONResponse(status_code=200, content=result)
     except Exception as e:
-        logger.exception("Quiz solving failed")
+        logger.exception("Failed")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
