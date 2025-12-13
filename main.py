@@ -94,17 +94,35 @@ async def ask_llm(question: str) -> Any:
 async def solve_github_last_task(text: str) -> int:
     """
     FINAL blocking task:
-    Count .md files in repo and add (email length mod 2)
+    Robustly extract GitHub repo, count .md files,
+    and add (email length mod 2).
     """
+
+    # 1️⃣ Try direct GitHub URL first
     match = re.search(
         r"https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
         text
     )
-    if not match:
-        raise ValueError("GitHub repository URL not found")
 
-    repo = match.group(1)
+    repo = None
+    if match:
+        repo = match.group(1)
 
+    # 2️⃣ Fallback: ask LLM to extract repo name
+    if not repo:
+        extract_prompt = (
+            "Extract the GitHub repository mentioned in the text below.\n"
+            "Return ONLY in the format owner/repo.\n\n"
+            f"{text}"
+        )
+        repo = await ask_llm(extract_prompt)
+
+        if not isinstance(repo, str) or "/" not in repo:
+            raise ValueError("Could not extract GitHub repository")
+
+        repo = repo.strip()
+
+    # 3️⃣ Fetch repo tree (try common branches)
     branches = ["main", "master"]
     tree = None
 
@@ -119,11 +137,13 @@ async def solve_github_last_task(text: str) -> int:
     if tree is None:
         raise ValueError("Could not fetch GitHub tree")
 
+    # 4️⃣ Count markdown files
     md_count = sum(
         1 for item in tree
-        if item["type"] == "blob" and item["path"].endswith(".md")
+        if item.get("type") == "blob" and item.get("path", "").endswith(".md")
     )
 
+    # 5️⃣ Apply email rule
     return md_count + (len(USER_EMAIL) % 2)
 
 
