@@ -3,6 +3,7 @@ import time
 import base64
 import json
 import logging
+import re
 from typing import Any, Dict
 
 import httpx
@@ -90,6 +91,42 @@ async def ask_llm(question: str) -> Any:
         return output
 
 
+async def solve_github_last_task(text: str) -> int:
+    """
+    FINAL blocking task:
+    Count .md files in repo and add (email length mod 2)
+    """
+    match = re.search(
+        r"https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)",
+        text
+    )
+    if not match:
+        raise ValueError("GitHub repository URL not found")
+
+    repo = match.group(1)
+
+    branches = ["main", "master"]
+    tree = None
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for branch in branches:
+            api_url = f"https://api.github.com/repos/{repo}/git/trees/{branch}?recursive=1"
+            r = await client.get(api_url)
+            if r.status_code == 200:
+                tree = r.json()["tree"]
+                break
+
+    if tree is None:
+        raise ValueError("Could not fetch GitHub tree")
+
+    md_count = sum(
+        1 for item in tree
+        if item["type"] == "blob" and item["path"].endswith(".md")
+    )
+
+    return md_count + (len(USER_EMAIL) % 2)
+
+
 # =====================
 # Core Solver (FINAL LOGIC)
 # =====================
@@ -108,15 +145,29 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
             r.raise_for_status()
 
             decoded_text = extract_text_from_js(r.text)
-
-            # Extract task description (ignore submission instructions)
             question = decoded_text.split("Post your answer", 1)[0].strip()
 
-            # Bootstrap page has no real question
+            # -------- TASK HANDLING (MINIMAL & EFFECTIVE) --------
+
+            # Bootstrap
             if current_url.endswith("/project2") and not question:
                 answer = 0
+
+            # UV task (exact command required)
+            elif "project2-uv" in current_url:
+                answer = (
+                    f'uv http get '
+                    f'https://tds-llm-analysis.s-anand.net/project2/uv.json?email={USER_EMAIL} '
+                    f'-H "Accept: application/json"'
+                )
+
+            # FINAL blocking GitHub task
+            elif "gh-tree" in current_url:
+                answer = await solve_github_last_task(decoded_text)
+
+            # Everything else → LLM
             else:
-                logger.info("Computing answer")
+                logger.info("Computing answer via LLM")
                 answer = await ask_llm(question)
 
             payload = {
