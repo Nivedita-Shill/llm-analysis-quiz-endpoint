@@ -3,34 +3,33 @@ import time
 import base64
 import json
 import logging
-import re
 from typing import Any, Dict
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 # =====================
-# ENVIRONMENT
+# Environment & Config
 # =====================
 load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 USER_EMAIL = os.getenv("USER_EMAIL")
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-AI_PIPE_URL = os.getenv("AI_PIPE_URL")
+AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
-GLOBAL_SUBMIT_URL = "https://tds-llm-analysis.s-anand.net/submit"
-TIME_LIMIT = 170  # < 3 minutes
+if not SECRET_KEY or not USER_EMAIL or not AI_PIPE_TOKEN:
+    raise RuntimeError("SECRET_KEY, USER_EMAIL, AI_PIPE_TOKEN must be set")
 
-if not all([SECRET_KEY, USER_EMAIL, AI_PIPE_TOKEN, AI_PIPE_URL]):
-    raise RuntimeError("Missing required environment variables")
+TIME_LIMIT = 170  # seconds (< 3 minutes)
+GLOBAL_SUBMIT_URL = "https://tds-llm-analysis.s-anand.net/submit"
 
 # =====================
-# APP
+# App & Logging
 # =====================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("quiz")
@@ -38,25 +37,38 @@ logger = logging.getLogger("quiz")
 app = FastAPI()
 
 # =====================
-# HELPERS
+# Helpers
 # =====================
 def extract_text_from_js(html: str) -> str:
+    """
+    Decode Base64 content embedded via atob(`...`) in JS-rendered task pages.
+    """
     soup = BeautifulSoup(html, "lxml")
     for script in soup.find_all("script"):
         if script.string and "atob(" in script.string:
-            encoded = script.string.split("atob(", 1)[1]
-            encoded = encoded.split(")", 1)[0].strip("`'\"")
-            return base64.b64decode(encoded).decode("utf-8", errors="ignore")
+            try:
+                encoded = script.string.split("atob(", 1)[1]
+                encoded = encoded.split(")", 1)[0].strip("`'\"")
+                return base64.b64decode(encoded).decode("utf-8", errors="ignore")
+            except Exception:
+                pass
     return soup.get_text("\n", strip=True)
 
 
-async def ask_llm(prompt: str) -> Any:
-    headers = {"Authorization": f"Bearer {AI_PIPE_TOKEN}"}
+async def ask_llm(question: str) -> Any:
+    """
+    Ask the LLM ONLY the task question.
+    Must return ONLY the final answer.
+    """
+    headers = {
+        "Authorization": f"Bearer {AI_PIPE_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
-    system_prompt = (
-        "You are solving a data analysis quiz. "
-        "Return ONLY the final answer. "
-        "No explanation."
+    prompt = (
+        "Return ONLY the final answer.\n"
+        "No explanation. No apology.\n\n"
+        f"{question}"
     )
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -65,80 +77,21 @@ async def ask_llm(prompt: str) -> Any:
             headers=headers,
             json={
                 "model": LLM_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
+                "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0,
             },
         )
         r.raise_for_status()
-        content = r.json()["choices"][0]["message"]["content"].strip()
+        output = r.json()["choices"][0]["message"]["content"].strip()
 
     try:
-        return json.loads(content)
+        return json.loads(output)
     except Exception:
-        return content
+        return output
 
 
 # =====================
-# TASK ROUTER
-# =====================
-def route_task(url: str) -> str:
-    u = url.lower()
-    if u.endswith("/project2"):
-        return "bootstrap"
-    if "uv" in u:
-        return "uv"
-    if "gh-tree" in u:
-        return "github"
-    return "llm"
-
-
-# =====================
-# TASK SOLVERS
-# =====================
-def solve_uv(task_text: str) -> str:
-    """
-    Return exact CLI command string.
-    """
-    match = re.search(r"(https?://[^\s]+uv\.json\?email=[^\s]+)", task_text)
-    if not match:
-        raise ValueError("UV JSON URL not found")
-    return f'uv http get {match.group(1)} -H "Accept: application/json"'
-
-
-async def solve_github_tree(task_text: str) -> int:
-    """
-    Count .md files under prefix and add (email length mod 2)
-    """
-    repo_match = re.search(r"github.com/([^/\s]+/[^/\s]+)", task_text)
-    prefix_match = re.search(r"prefix[:\s]+([^\s]+)", task_text)
-
-    if not repo_match or not prefix_match:
-        raise ValueError("Could not extract repo or prefix")
-
-    repo = repo_match.group(1)
-    prefix = prefix_match.group(1)
-
-    api_url = f"https://api.github.com/repos/{repo}/git/trees/main?recursive=1"
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(api_url)
-        r.raise_for_status()
-        tree = r.json()["tree"]
-
-    md_count = sum(
-        1
-        for item in tree
-        if item["path"].startswith(prefix) and item["path"].endswith(".md")
-    )
-
-    return md_count + (len(USER_EMAIL) % 2)
-
-
-# =====================
-# CORE SOLVER
+# Core Solver (FINAL LOGIC)
 # =====================
 async def solve_quiz(start_url: str) -> Dict[str, Any]:
     start_time = time.time()
@@ -155,22 +108,16 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
             r.raise_for_status()
 
             decoded_text = extract_text_from_js(r.text)
-            task_type = route_task(current_url)
 
-            logger.info(f"Task detected: {task_type}")
+            # Extract task description (ignore submission instructions)
+            question = decoded_text.split("Post your answer", 1)[0].strip()
 
-            if task_type == "bootstrap":
+            # Bootstrap page has no real question
+            if current_url.endswith("/project2") and not question:
                 answer = 0
-
-            elif task_type == "uv":
-                answer = solve_uv(decoded_text)
-
-            elif task_type == "github":
-                answer = await solve_github_tree(decoded_text)
-
             else:
-                # LLM handles md / csv / image / audio reasoning
-                answer = await ask_llm(decoded_text)
+                logger.info("Computing answer")
+                answer = await ask_llm(question)
 
             payload = {
                 "email": USER_EMAIL,
@@ -184,14 +131,14 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
             resp.raise_for_status()
             last_response = resp.json()
 
-            logger.info(f"Response: {last_response}")
+            logger.info(f"Submission response: {last_response}")
             current_url = last_response.get("url")
 
     return last_response
 
 
 # =====================
-# API ENDPOINT
+# API Endpoint
 # =====================
 @app.post("/quiztasks")
 async def quiztasks(request: Request):
@@ -210,10 +157,10 @@ async def quiztasks(request: Request):
         result = await solve_quiz(body["url"])
         return JSONResponse(status_code=200, content=result)
     except Exception as e:
-        logger.exception("Quiz failed")
+        logger.exception("Quiz solving failed")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
