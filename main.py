@@ -3,7 +3,6 @@ import time
 import base64
 import json
 import logging
-import re
 from typing import Any, Dict
 
 import httpx
@@ -42,7 +41,7 @@ app = FastAPI()
 # =====================
 def extract_text_from_js(html: str) -> str:
     """
-    Decode Base64 content embedded via atob(`...`) in JS-rendered quiz pages.
+    Decode Base64 content embedded via atob(`...`) in JS-rendered task pages.
     """
     soup = BeautifulSoup(html, "lxml")
     for script in soup.find_all("script"):
@@ -58,10 +57,13 @@ def extract_text_from_js(html: str) -> str:
 
 async def ask_llm(question: str) -> Any:
     """
-    Ask the LLM ONLY the question text.
+    Ask the LLM ONLY the task question.
     Must return ONLY the final answer.
     """
-    headers = {"Authorization": f"Bearer {AI_PIPE_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {AI_PIPE_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
     prompt = (
         "Return ONLY the final answer.\n"
@@ -89,7 +91,7 @@ async def ask_llm(question: str) -> Any:
 
 
 # =====================
-# Core Solver (FINAL)
+# Core Solver (FINAL LOGIC)
 # =====================
 async def solve_quiz(start_url: str) -> Dict[str, Any]:
     start_time = time.time()
@@ -101,51 +103,21 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
             if time.time() - start_time > TIME_LIMIT:
                 raise TimeoutError("Time limit exceeded")
 
-            logger.info(f"Fetching: {current_url}")
+            logger.info(f"Fetching task: {current_url}")
             r = await client.get(current_url)
             r.raise_for_status()
 
             decoded_text = extract_text_from_js(r.text)
 
-            # Try to find submit URL inside task text
-            submit_match = re.search(r"https?://[^\s]+/submit", decoded_text)
-
-            # -------------------------------------------------
-            # BOOTSTRAP CASE: /project2
-            # -------------------------------------------------
-            if not submit_match:
-                if current_url.endswith("/project2"):
-                    logger.info("Bootstrap URL detected (/project2)")
-
-                    payload = {
-                        "email": USER_EMAIL,
-                        "secret": SECRET_KEY,
-                        "url": current_url,
-                        # IMPORTANT: answer must NOT be null
-                        "answer": "12345"
-                    }
-
-                    resp = await client.post(GLOBAL_SUBMIT_URL, json=payload)
-                    resp.raise_for_status()
-                    last_response = resp.json()
-
-                    current_url = last_response.get("url")
-                    continue
-
-                # Any other page without submit URL is invalid
-                raise ValueError("Submit URL not found")
-
-            # -------------------------------------------------
-            # NORMAL QUIZ PAGE
-            # -------------------------------------------------
-            submit_url = submit_match.group(0)
-
-            # Extract only the question (strip instructions)
+            # Extract task description (ignore submission instructions)
             question = decoded_text.split("Post your answer", 1)[0].strip()
 
-            logger.info("Sending question to LLM")
-            answer = await ask_llm(question)
-            logger.info(f"Answer computed: {answer}")
+            # Bootstrap page has no real question
+            if current_url.endswith("/project2") and not question:
+                answer = 0
+            else:
+                logger.info("Computing answer")
+                answer = await ask_llm(question)
 
             payload = {
                 "email": USER_EMAIL,
@@ -154,7 +126,8 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
                 "answer": answer,
             }
 
-            resp = await client.post(submit_url, json=payload)
+            logger.info("Submitting to global /submit")
+            resp = await client.post(GLOBAL_SUBMIT_URL, json=payload)
             resp.raise_for_status()
             last_response = resp.json()
 
