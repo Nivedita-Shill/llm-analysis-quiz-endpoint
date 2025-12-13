@@ -3,6 +3,7 @@ import time
 import base64
 import json
 import logging
+import re
 from typing import Any, Dict
 
 import httpx
@@ -19,11 +20,13 @@ load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 USER_EMAIL = os.getenv("USER_EMAIL")
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://aipipe.org/openrouter/v1/chat/completions")
+AI_PIPE_URL = os.getenv("AI_PIPE_URL", "https://api.pip.ai/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
-if not SECRET_KEY or not USER_EMAIL:
-    raise RuntimeError("SECRET_KEY and USER_EMAIL must be set in environment")
+if not SECRET_KEY or not USER_EMAIL or not AI_PIPE_TOKEN:
+    raise RuntimeError("SECRET_KEY, USER_EMAIL, and AI_PIPE_TOKEN must be set")
+
+TIME_LIMIT = 170  # seconds (global, < 3 minutes)
 
 # =====================
 # App & Logging
@@ -33,44 +36,39 @@ logger = logging.getLogger("tds-llm-quiz")
 
 app = FastAPI()
 
-TIME_LIMIT = 170  # seconds (safe margin under 3 minutes)
-
 # =====================
-# Utility Functions
+# Helpers
 # =====================
-
 def extract_text_from_js(html: str) -> str:
     """
-    Extracts Base64-encoded content inside atob(`...`) from script tags
-    and returns decoded text.
+    Decode Base64 content embedded via atob(`...`) in JS-rendered quiz pages.
     """
     soup = BeautifulSoup(html, "lxml")
-    scripts = soup.find_all("script")
-
-    for script in scripts:
+    for script in soup.find_all("script"):
         if script.string and "atob(" in script.string:
             try:
                 encoded = script.string.split("atob(", 1)[1]
                 encoded = encoded.split(")", 1)[0].strip("`'\"")
-                decoded = base64.b64decode(encoded).decode("utf-8", errors="ignore")
-                return decoded
+                return base64.b64decode(encoded).decode("utf-8", errors="ignore")
             except Exception:
-                continue
-
-    # Fallback: visible text
+                pass
     return soup.get_text("\n", strip=True)
 
 
 async def ask_llm(question: str) -> Any:
-    """Ask LLM to compute the final answer."""
+    """
+    Ask the LLM ONLY the question.
+    Must return ONLY the final answer.
+    """
     headers = {
         "Authorization": f"Bearer {AI_PIPE_TOKEN}",
         "Content-Type": "application/json",
     }
 
     prompt = (
-        "You are solving a data analysis quiz. "
-        "Follow the instructions exactly and return ONLY the final answer.\n\n"
+        "You are answering a data analysis question.\n"
+        "Return ONLY the final answer.\n"
+        "No explanation. No apology.\n\n"
         f"QUESTION:\n{question}"
     )
 
@@ -87,13 +85,15 @@ async def ask_llm(question: str) -> Any:
         r.raise_for_status()
         content = r.json()["choices"][0]["message"]["content"].strip()
 
-    # Try JSON parse if possible
     try:
         return json.loads(content)
     except Exception:
         return content
 
 
+# =====================
+# Core Solver (Iterative)
+# =====================
 async def solve_quiz(start_url: str) -> Dict[str, Any]:
     start_time = time.time()
     current_url = start_url
@@ -108,21 +108,20 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
             r = await client.get(current_url)
             r.raise_for_status()
 
-            question_text = extract_text_from_js(r.text)
-            logger.info(f"Extracted question text")
+            decoded_text = extract_text_from_js(r.text)
 
-            answer = await ask_llm(question_text)
+            # Extract submit URL
+            match = re.search(r"https?://[^\s]+/submit", decoded_text)
+            if not match:
+                raise ValueError("Submit URL not found")
+            submit_url = match.group(0)
+
+            # Extract only the question
+            question = decoded_text.split("Post your answer", 1)[0].strip()
+
+            logger.info("Sending question to LLM")
+            answer = await ask_llm(question)
             logger.info(f"Computed answer: {answer}")
-
-            # Find submit URL inside decoded content
-            submit_url = None
-            for line in question_text.splitlines():
-                if line.strip().startswith("http") and "submit" in line:
-                    submit_url = line.strip()
-                    break
-
-            if not submit_url:
-                raise ValueError("Submit URL not found in quiz text")
 
             payload = {
                 "email": USER_EMAIL,
@@ -135,8 +134,8 @@ async def solve_quiz(start_url: str) -> Dict[str, Any]:
             resp = await client.post(submit_url, json=payload)
             resp.raise_for_status()
             last_response = resp.json()
-            logger.info(f"Submission response: {last_response}")
 
+            logger.info(f"Submission response: {last_response}")
             current_url = last_response.get("url")
 
     return last_response
@@ -168,5 +167,4 @@ async def quiztasks(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
